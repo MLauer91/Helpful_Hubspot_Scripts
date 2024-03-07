@@ -1,132 +1,103 @@
 import requests
 import json
-from datetime import datetime
 
-api_key = "YOUR_API_KEY_HERE"  
-    # replace with >> os.getenv('YOUR_PRIVATE_APP_SECRET_HERE')
-    # ensure the private app has read/write authority for the objects you are operating, keeping in mind that engagements are under the contacts object
-main_object = "contacts" 
-    # this will be the object you are STARTING from
-    # example, you want to see all meetings for a certain contact, this would be 'contacts'
-main_object_id = "1234567890"  
-    # replace with >> event["inputFields"]["contactid"] 
-    # ensure you have the property to include in code as 'main_object_id' for the 'Record ID' of the record in the workflow
-target_object = "meetings"
-    # replace with >> object you want to get associated records to
-    # example, you want to see all meetings for a certain contact, this would be 'meetings'
-record_type = "meetings"
-    # this isn't critical to run but if you want to label these records with a custom label, change this to identiy the call
-properties = {
-    "hs_createdate": "date",
-    "hs_meeting_title": "regular",
-    "hs_created_by_user_id": "regular"
-}
-    # properties are under two types, "date" and "regular"
-    # date will format the date into a standard "MM-DD-YYYY" format
-    # regular will treat the value as a string
+def main(event):
+    api_key = "PRIVATE_APP_TOKEN"  
+        # replace with >> os.getenv('YOUR_PRIVATE_APP_SECRET_HERE')
+        # ensure the private app has read/write authority for the objects you are operating, keeping in mind that engagements are under the contacts object
+    main_object = "company"  
+        # this will be the object you are STARTING from
+        # example, you want to see all meetings for a certain company, this would be 'company'
+    main_object_id = event.get('object').get('objectId')  
 
-today = datetime.today().strftime("%m-%d-%Y")
+    target_object = "meetings"
+        # replace with >> object you want to get associated records to
+        # example, you want to see all meetings for a certain company, this would be 'meetings'
+    properties = [
+        "hs_createdate",
+        "hs_meeting_title",
+        "hs_created_by_user_id"
+    ]
 
-# This is the function which gets the related records to your main object
-# Example, this will call for all the meetings related to a specific contact
-def get_object_details(api_key, main_object, main_object_id, target_object, record_type, properties):
-    def get_associated_ids(main_object, main_object_id, target_object, api_key):
-        url = f"https://api.hubapi.com/crm/v3/objects/{main_object}/{main_object_id}/associations/{target_object}"
+    def search_target_object(api_key, main_object, main_object_id, target_object, properties):
+        request_url = f"https://api.hubapi.com/crm/v3/objects/{target_object}/search"
         headers = {
             'Authorization': f'Bearer {api_key}',
             'Content-Type': 'application/json'
         }
-        response = requests.get(url, headers=headers)
+        payload = json.dumps({
+            "filterGroups": [
+                {
+                    "filters": [
+                        {
+                            "value": main_object_id,
+                            "propertyName": f"associations.{main_object}",
+                            "operator": "EQ"
+                        }
+                    ]
+                }
+            ],
+            "sorts": [
+                {
+                    "propertyName": "hs_createdate",
+                    "direction": "DESCENDING"
+                }
+            ],
+            "properties": properties,
+            "limit": 1
+        })
+        print(payload)
+        response = requests.post(request_url, headers=headers, data=payload)
         if response.status_code == 200:
-            relevant_ids = [assoc['id'] for assoc in response.json().get('results', [])]
-            return relevant_ids
+            data = response.json()
+            if data['total'] > 0:
+                return data['results'][0]
         else:
-            print(f"Failed to fetch associated ids: {response.status_code}")
-            return None
+            print(f"Failed to search {target_object}: {response.status_code}")
+        return None
 
-    def parse_date(date_str):
-        try:
-            return datetime.fromisoformat(date_str.rstrip("Z")).strftime("%m-%d-%Y")
-        except:
-            return None
+    def owner_lookup(api_key, owner_id):
+        url = f"https://api.hubapi.com/crm/v3/owners/{owner_id}?idProperty=userid&archived=false"
+        headers = {
+            'Accept': 'application/json',
+            'Authorization': f'Bearer {api_key}'
+        }
+        response = requests.get(url, headers=headers)
+        print(response.json())
+        if response.status_code == 200:
+            data = response.json()
+            return data['id']
+        else:
+            print(f"Failed to lookup owner: {response.status_code}")
+        return None
 
-    record_ids = get_associated_ids(main_object, main_object_id, target_object, api_key)
-    if record_ids is None:
-        return []
+    def update_main_object(api_key, main_object, object_id, owner_id):
+        url = f"https://api.hubapi.com/crm/v3/objects/{main_object}/{object_id}"
+        headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'Authorization': f'Bearer {api_key}'
+        }
+        payload = json.dumps({
+            "properties": {
+                "hubspot_owner_id": owner_id
+            }
+        })
+        response = requests.patch(url, headers=headers, data=payload)
+        if response.status_code == 200:
+            print(f"Successfully updated {main_object} {object_id}")
+        else:
+            print(f"Failed to update {main_object}: {response.status_code}")
 
-    url = f"https://api.hubapi.com/crm/v3/objects/{target_object}/batch/read"
-    headers = {
-        'Authorization': f'Bearer {api_key}',
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-    }
-    
-    payload = json.dumps({
-        "inputs": [{"id": record_id} for record_id in record_ids],
-        "properties": list(properties.keys())
-    })
+    # Search for a meeting associated with the main object
+    recent_target_object = search_target_object(api_key, main_object, main_object_id, target_object, properties)
 
-    response = requests.post(url, headers=headers, data=payload)
-    if response.status_code == 200:
-        data = response.json()
-        results = []
-        for item in data.get('results', []):
-            record_id = item.get('id')
-            result = {'record_id': record_id, 'record_type': record_type}
-            for prop, prop_type in properties.items():
-                value = item.get('properties', {}).get(prop, None)
-                if prop_type == 'date':
-                    value = parse_date(value)
-                result[prop] = value
-            results.append(result)
-        return results
+    if recent_target_object:
+        # Meeting found, proceed with owner lookup and update the main object
+        print(recent_target_object)
+        owner_id = recent_target_object['properties']['hs_created_by_user_id']
+        owner_id = owner_lookup(api_key, owner_id)
+        if owner_id:
+            update_main_object(api_key, main_object, main_object_id, owner_id)
     else:
-        print(f"Failed to fetch object details: {response.status_code}, Message: {response.text}")
-        return []
-
-# This will call Hubspot to get the id required to change the owner of the target object based on who created the meeting
-def owner_lookup(api_key, owner_id):
-    url = f"https://api.hubapi.com/crm/v3/owners/{owner_id}?idProperty=userid&archived=false"
-
-    payload = {}
-    headers = {
-    'Accept': 'application/json',
-    'Authorization': f'Bearer {api_key}'
-    }
-
-    response = requests.request("GET", url, headers=headers, data=payload)
-    data = response.json()
-    #print(data['id'])
-    return data['id']
-
-# This will update the specified contact with the correct owner ID from the owner lookup function
-def update_contact(api_key, contact_id, owner_id):
-    url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
-
-    payload = json.dumps({
-    "properties": {
-        "hubspot_owner_id": f"{owner_id}"
-    }
-    })
-    headers = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-    'Authorization': f'Bearer {api_key}'
-    }
-
-    response = requests.request("PATCH", url, headers=headers, data=payload)
-
-    return response.text
-
-# This is the series of functions which will parse through all engagements on a contact, find the one created today, and update the owner property
-engagements_results = get_object_details(api_key, main_object, main_object_id, target_object, record_type, properties)
-
-# This is the for loop for going through each engagement / meeting record on the contact
-for meeting in engagements_results:
-    # This if statement only activates if the create date on the record matches today's date, assuming this is paired up with proper enrollment criteria
-    if today == meeting['hs_createdate']:
-        print(meeting['hs_created_by_user_id'])
-        owner_id = owner_lookup(api_key, owner_id=meeting['hs_created_by_user_id'])
-        print(owner_id)
-        print(update_contact(api_key, contact_id=main_object_id, owner_id=owner_id))
-        break
+        print(f"No associated {target_object} found for the main object.")
